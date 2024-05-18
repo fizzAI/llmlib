@@ -13,7 +13,7 @@ class LayerNorm(eqx.Module):
     def __init__(self, shape: Int, epsilon: Float = 1e-5, use_weight: bool = True, use_bias: bool = True):
         self.shape = shape
         self.weight = jnp.ones(shape) if use_weight else None
-        self.weight = jnp.ones(shape) if use_weight else None
+        self.bias = jnp.zeros(shape) if use_bias else None
         self.epsilon = epsilon
     
     def __call__(self, x: Array, dtype=jnp.float32) -> Array:

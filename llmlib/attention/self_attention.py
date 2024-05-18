@@ -24,10 +24,10 @@ class SelfAttention(eqx.Module):
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = dim // self.n_heads
 
-        self.q_proj = eqx.nn.Linear(dim, self.n_heads * self.head_dim, use_bias=False)
-        self.k_proj = eqx.nn.Linear(dim, self.n_kv_heads * self.head_dim, use_bias=False)
-        self.v_proj = eqx.nn.Linear(dim, self.n_kv_heads * self.head_dim, use_bias=False)
-        self.o_proj = eqx.nn.Linear(self.n_heads * self.head_dim, dim, use_bias=False)
+        self.q_proj = eqx.nn.Linear(dim, self.n_heads * self.head_dim, use_bias=False, key=jax.random.PRNGKey(0))
+        self.k_proj = eqx.nn.Linear(dim, self.n_kv_heads * self.head_dim, use_bias=False, key=jax.random.PRNGKey(0))
+        self.v_proj = eqx.nn.Linear(dim, self.n_kv_heads * self.head_dim, use_bias=False, key=jax.random.PRNGKey(0))
+        self.o_proj = eqx.nn.Linear(self.n_heads * self.head_dim, dim, use_bias=False, key=jax.random.PRNGKey(0))
 
         self.mask = jnp.full((1, 1, max_seq_len, max_seq_len), -jnp.inf)
         self.mask = jnp.triu(self.mask, k=1)
@@ -55,6 +55,7 @@ class SelfAttention(eqx.Module):
 
         return self.o_proj(xo)
 
+# TODO
 class SelfAttentionWithRoPE(SelfAttention):
     def __call__(self, x: Array, freqs_cos: Array, freqs_sin: Array) -> Array:
         pass

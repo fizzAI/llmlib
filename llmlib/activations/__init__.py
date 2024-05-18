@@ -1,4 +1,4 @@
-from gelu import GELU, ApproximateGELU
+from .gelu import GELU, ApproximateGELU
 
 def get_activation_by_name(name: str):
     match name:
