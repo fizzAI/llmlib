@@ -24,7 +24,9 @@ class LayerNorm(eqx.Module):
         inv = jax.lax.rsqrt(variance + self.epsilon)
         y = (x - mean) * inv
         # FIXME: do i need double negation here
-        if not not self.weight:
+        if not (self.weight is None):
             y = y * self.weight
-        if not not self.bias:
+        if not (self.bias is None):
             y = y + self.bias
+        
+        return y

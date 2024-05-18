@@ -7,7 +7,7 @@ import jax
 import json
 
 from .template import GenerativeModel
-from ..attention.self_attention import SelfAttention
+from ..attention.self_attention import FusedSelfAttention
 from ..activations import get_activation_by_name
 from ..normalization import LayerNorm
 
@@ -31,7 +31,7 @@ class GPT2TransformerBlock(eqx.Module):
     head_dim: Int
 
     ln1: LayerNorm
-    attn: SelfAttention
+    attn: FusedSelfAttention
     ln2: LayerNorm
     mlp: GPT2MultiLayerPerceptron
 
@@ -41,7 +41,7 @@ class GPT2TransformerBlock(eqx.Module):
         self.head_dim = dim // self.n_heads
 
         self.ln1 = LayerNorm(dim)
-        self.attn = SelfAttention(dim, max_seq_len, num_heads, num_kv_heads)
+        self.attn = FusedSelfAttention(dim, max_seq_len, num_heads, num_kv_heads)
         self.ln2 = LayerNorm(dim)
         self.mlp = GPT2MultiLayerPerceptron(dim, dim * 4)
 
@@ -61,7 +61,7 @@ class GPT2(GenerativeModel):
 
     wte: eqx.nn.Embedding
     wpe: eqx.nn.Embedding
-    transformers: eqx.nn.Sequential
+    transformers: list[GPT2TransformerBlock]
     ln_f: LayerNorm
     lm_head: eqx.nn.Linear
 
@@ -74,10 +74,10 @@ class GPT2(GenerativeModel):
 
         self.wte = eqx.nn.Embedding(vocab_size, dim, key=jax.random.PRNGKey(0))
         self.wpe = eqx.nn.Embedding(max_seq_len, dim, key=jax.random.PRNGKey(0)) # i think??
-        self.transformers = eqx.nn.Sequential([
+        self.transformers = [
             GPT2TransformerBlock(dim, max_seq_len, num_heads, num_kv_heads)
             for _ in range(n_layers)
-        ])
+        ]
         self.ln_f = LayerNorm(dim)
         self.lm_head = eqx.nn.Linear(dim, vocab_size, use_bias=False, key=jax.random.PRNGKey(0))
 
@@ -116,113 +116,155 @@ class GPT2(GenerativeModel):
             )
 
             for i, transformer in enumerate(model.transformers):
-                # their attention qkv linears are concatenated into one `c_attn` tensor. we need to split them
-                c_attn = jnp.asarray(f.get_tensor(f"h.{i}.attn.c_attn.weight"))
-                c_attn = c_attn.reshape(3, -1, model.dim)
-                model.transformers.layers[0].attn.q_proj = eqx.tree_at(
+                c_attn_weight = jnp.asarray(f.get_tensor(f"h.{i}.attn.c_attn.weight"))
+                c_attn_bias = jnp.asarray(f.get_tensor(f"h.{i}.attn.c_attn.bias")) # shape [2 304] 
+                c_attn_layer = eqx.nn.Linear(model.dim, model.dim * 3, key=jax.random.PRNGKey(0))
+                c_attn_layer = eqx.tree_at(
                     lambda x: x.weight,
-                    transformer.attn.q_proj,
-                    c_attn[0]
+                    c_attn_layer,
+                    c_attn_weight
                 )
-                model.transformers.layers[0].attn.k_proj = eqx.tree_at(
-                    lambda x: x.weight,
-                    transformer.attn.k_proj,
-                    c_attn[1]
-                )
-                model.transformers.layers[0].attn.v_proj = eqx.tree_at(
-                    lambda x: x.weight,
-                    transformer.attn.v_proj,
-                    c_attn[2]
-                )
-                # load other attn weights. output projection is in c_proj for some reason
-                model.transformers.layers[0].attn.o_proj = eqx.tree_at(
-                    lambda x: x.weight,
-                    transformer.attn.o_proj,
-                    jnp.asarray(f.get_tensor(f"h.{i}.attn.c_proj.weight"))
+                c_attn_layer = eqx.tree_at(
+                    lambda x: x.bias,
+                    c_attn_layer,
+                    c_attn_bias
                 )
 
-                # same but for biases
-                c_attn = jnp.asarray(f.get_tensor(f"h.{i}.attn.c_attn.bias"))
-                c_attn = c_attn.reshape(3, -1)
-                model.transformers.layers[0].attn.q_proj = eqx.tree_at(
-                    lambda x: x.bias,
-                    transformer.attn.q_proj,
-                    c_attn[0]
-                )
-                model.transformers.layers[0].attn.k_proj = eqx.tree_at(
-                    lambda x: x.bias,
-                    transformer.attn.k_proj,
-                    c_attn[1]
-                )
-                model.transformers.layers[0].attn.v_proj = eqx.tree_at(
-                    lambda x: x.bias,
-                    transformer.attn.v_proj,
-                    c_attn[2]
-                )
-                # load other attn biases
-                model.transformers.layers[0].attn.o_proj = eqx.tree_at(
-                    lambda x: x.bias,
-                    transformer.attn.o_proj,
-                    jnp.asarray(f.get_tensor(f"h.{i}.attn.c_proj.bias"))
-                )
-                # FIXME: there's apparently a generic bias here? never seen it in the implementations
-                
-                # load the rest of the weights
-                model.transformers.layers[0].mlp.c_fc = eqx.tree_at(
+                # output proj too (its c_proj for some reason)
+                c_proj_weight = jnp.asarray(f.get_tensor(f"h.{i}.attn.c_proj.weight"))
+                c_proj_bias = jnp.asarray(f.get_tensor(f"h.{i}.attn.c_proj.bias"))
+                c_proj_layer = eqx.nn.Linear(model.dim, model.dim, key=jax.random.PRNGKey(0))
+                c_proj_layer = eqx.tree_at(
                     lambda x: x.weight,
-                    transformer.mlp.c_fc,
-                    jnp.asarray(f.get_tensor(f"h.{i}.mlp.c_fc.weight"))
+                    c_proj_layer,
+                    c_proj_weight
                 )
-                model.transformers.layers[0].mlp.c_fc = eqx.tree_at(
+                c_proj_layer = eqx.tree_at(
                     lambda x: x.bias,
-                    transformer.mlp.c_fc,
-                    jnp.asarray(f.get_tensor(f"h.{i}.mlp.c_fc.bias"))
-                )
-                model.transformers.layers[0].mlp.c_proj = eqx.tree_at(
-                    lambda x: x.weight,
-                    transformer.mlp.c_proj,
-                    jnp.asarray(f.get_tensor(f"h.{i}.mlp.c_proj.weight"))
-                )
-                model.transformers.layers[0].mlp.c_proj = eqx.tree_at(
-                    lambda x: x.bias,
-                    transformer.mlp.c_proj,
-                    jnp.asarray(f.get_tensor(f"h.{i}.mlp.c_proj.bias"))
+                    c_proj_layer,
+                    c_proj_bias
                 )
 
-                model.transformers.layers[0].ln1 = eqx.tree_at(
-                    lambda x: x.weight,
-                    transformer.ln1,
-                    jnp.asarray(f.get_tensor(f"h.{i}.ln_1.weight"))
+                new_attn_layer = FusedSelfAttention(model.dim, model.max_seq_len, model.n_heads, model.n_kv_heads)
+                new_attn_layer = eqx.tree_at(
+                    lambda x: x.qkv_proj,
+                    new_attn_layer,
+                    c_attn_layer
                 )
-                model.transformers.layers[0].ln1 = eqx.tree_at(
-                    lambda x: x.bias,
-                    transformer.ln1,
-                    jnp.asarray(f.get_tensor(f"h.{i}.ln_1.bias"))
+                new_attn_layer = eqx.tree_at(
+                    lambda x: x.o_proj,
+                    new_attn_layer,
+                    c_proj_layer
                 )
-                model.transformers.layers[0].ln2 = eqx.tree_at(
-                    lambda x: x.weight,
-                    transformer.ln2,
-                    jnp.asarray(f.get_tensor(f"h.{i}.ln_2.weight"))
-                )
-                model.transformers.layers[0].ln2 = eqx.tree_at(
-                    lambda x: x.bias,
-                    transformer.ln2,
-                    jnp.asarray(f.get_tensor(f"h.{i}.ln_2.bias"))
+                model.transformers[i] = eqx.tree_at(
+                    lambda x: x.attn,
+                    model.transformers[i],
+                    new_attn_layer
                 )
 
+                # norms and mlp are a bit simpler
+                ln1_weight = jnp.asarray(f.get_tensor(f"h.{i}.ln_1.weight"))
+                ln1_bias = jnp.asarray(f.get_tensor(f"h.{i}.ln_1.bias"))
+                ln1_layer = LayerNorm(model.dim)
+                ln1_layer = eqx.tree_at(
+                    lambda x: x.weight,
+                    ln1_layer,
+                    ln1_weight
+                )
+                ln1_layer = eqx.tree_at(
+                    lambda x: x.bias,
+                    ln1_layer,
+                    ln1_bias
+                )
+                model.transformers[i] = eqx.tree_at(
+                    lambda x: x.ln1,
+                    model.transformers[i],
+                    ln1_layer
+                )
 
-            model.ln_f = eqx.tree_at(
+                ln2_weight = jnp.asarray(f.get_tensor(f"h.{i}.ln_2.weight"))
+                ln2_bias = jnp.asarray(f.get_tensor(f"h.{i}.ln_2.bias"))
+                ln2_layer = LayerNorm(model.dim)
+                ln2_layer = eqx.tree_at(
+                    lambda x: x.weight,
+                    ln2_layer,
+                    ln2_weight
+                )
+                ln2_layer = eqx.tree_at(
+                    lambda x: x.bias,
+                    ln2_layer,
+                    ln2_bias
+                )
+                model.transformers[i] = eqx.tree_at(
+                    lambda x: x.ln2,
+                    model.transformers[i],
+                    ln2_layer
+                )
+
+                c_fc_weight = jnp.asarray(f.get_tensor(f"h.{i}.mlp.c_fc.weight"))
+                c_fc_bias = jnp.asarray(f.get_tensor(f"h.{i}.mlp.c_fc.bias"))
+                c_fc_layer = eqx.nn.Linear(model.dim, model.dim * 4, key=jax.random.PRNGKey(0))
+                c_fc_layer = eqx.tree_at(
+                    lambda x: x.weight,
+                    c_fc_layer,
+                    c_fc_weight
+                )
+                c_fc_layer = eqx.tree_at(
+                    lambda x: x.bias,
+                    c_fc_layer,
+                    c_fc_bias
+                )
+
+                c_proj_weight = jnp.asarray(f.get_tensor(f"h.{i}.mlp.c_proj.weight"))
+                c_proj_bias = jnp.asarray(f.get_tensor(f"h.{i}.mlp.c_proj.bias"))
+                c_proj_layer = eqx.nn.Linear(model.dim * 4, model.dim, key=jax.random.PRNGKey(0))
+                c_proj_layer = eqx.tree_at(
+                    lambda x: x.weight,
+                    c_proj_layer,
+                    c_proj_weight
+                )
+                c_proj_layer = eqx.tree_at(
+                    lambda x: x.bias,
+                    c_proj_layer,
+                    c_proj_bias
+                )
+
+                new_mlp_layer = GPT2MultiLayerPerceptron(model.dim, model.dim * 4)
+                new_mlp_layer = eqx.tree_at(
+                    lambda x: x.c_fc,
+                    new_mlp_layer,
+                    c_fc_layer
+                )
+                new_mlp_layer = eqx.tree_at(
+                    lambda x: x.c_proj,
+                    new_mlp_layer,
+                    c_proj_layer
+                )
+                model.transformers[i] = eqx.tree_at(
+                    lambda x: x.mlp,
+                    model.transformers[i],
+                    new_mlp_layer
+                )
+
+            # load final layer norm and lm_head
+            ln_f_weight = jnp.asarray(f.get_tensor("ln_f.weight"))
+            ln_f_bias = jnp.asarray(f.get_tensor("ln_f.bias"))
+            ln_f_layer = LayerNorm(model.dim)
+            ln_f_layer = eqx.tree_at(
                 lambda x: x.weight,
-                model.ln_f,
-                jnp.asarray(f.get_tensor("ln_f.weight"))
+                ln_f_layer,
+                ln_f_weight
             )
-            model.ln_f = eqx.tree_at(
+            ln_f_layer = eqx.tree_at(
                 lambda x: x.bias,
-                model.ln_f,
-                jnp.asarray(f.get_tensor("ln_f.bias"))
+                ln_f_layer,
+                ln_f_bias
             )
+            model.ln_f = ln_f_layer
 
             model.lm_head = jnp.transpose(wte)
+
+        return model
 
     def __call__(self, x: Array) -> Array:
         if x.shape[0] > self.max_seq_len:
@@ -230,9 +272,14 @@ class GPT2(GenerativeModel):
 
         pos = jnp.arange(0, x.shape[0])
         
-        x = self.wte(x)
-        x = x + self.wpe(pos)
+        x = jax.vmap(self.wte)(x)
+        x = x + jax.vmap(self.wpe)(pos)
         for transformer in self.transformers:
             x = transformer(x)
         x = self.ln_f(x)
         return self.lm_head(x)
+
+    def generate(self, inp: any, n_output: int = 1):
+        inp = jnp.asarray(inp)
+        logits = self(inp)
+        return logits[-n_output:]
