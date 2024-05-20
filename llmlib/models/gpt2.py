@@ -272,8 +272,8 @@ class GPT2(GenerativeModel):
 
         pos = jnp.arange(0, x.shape[0])
         
-        x = jax.vmap(self.wte)(x)
-        x = x + jax.vmap(self.wpe)(pos)
+        x = self.wte.weight[x]
+        x = x + self.wpe.weight[pos]
         for transformer in self.transformers:
             x = transformer(x)
         x = self.ln_f(x)

@@ -83,23 +83,25 @@ class FusedSelfAttention(eqx.Module):
         print(x.shape)
 
         # QKV
-        xqkv = self.qkv_proj(x)
+        xqkv = x @ self.qkv_proj.weight
         xq, xk, xv = jnp.split(xqkv, 3, axis=-1)
-        """ xq = jnp.transpose(xq.view(seqlen, self.n_heads, self.head_dim), (1, 2))
-        xk = jnp.transpose(xk.view(seqlen, self.n_kv_heads, self.head_dim), (1, 2))
-        xv = jnp.transpose(xv.view(seqlen, self.n_kv_heads, self.head_dim), (1, 2)) """
-        qx = xq.view(seqlen, self.n_heads, self.head_dim)
+        xq = xq.reshape(seqlen, self.n_heads, self.head_dim)
+        xk = xk.reshape(seqlen, self.n_kv_heads, self.head_dim)
+        xv = xv.reshape(seqlen, self.n_kv_heads, self.head_dim)
 
         # dot-product attention
-        scores = jnp.matmul(xq, jnp.transpose(xk, (2, 3))) / jax.lax.sqrt(self.head_dim)
-        scores = scores + self.mask[:, :, :seqlen, :seqlen]
+        scores = xq @ jnp.transpose(xk, (0, 2, 1)) / jax.lax.sqrt(float(self.head_dim))
+        # scores = scores + self.mask[:, :, :seqlen, :seqlen]
         scores = jax.nn.softmax(scores, axis=-1)
 
-        xo = jnp.matmul(scores, xv)
+        xo = scores @ xv
 
-        xo = jnp.transpose(xo, (1, 2)).view(seqlen, -1)
+        xo = xo.reshape(seqlen, -1)
 
-        return self.o_proj(xo)
+        print(xo.shape)
+        print(self.o_proj.weight.shape)
+
+        return jax.vmap(self.o_proj)(xo)
 
 # TODO
 class SelfAttentionWithRoPE(SelfAttention):
