@@ -75,33 +75,41 @@ class FusedSelfAttention(eqx.Module):
         self.qkv_proj = eqx.nn.Linear(dim, 3 * self.n_heads * self.head_dim, use_bias=False, key=jax.random.PRNGKey(0))
         self.o_proj = eqx.nn.Linear(self.n_heads * self.head_dim, dim, use_bias=False, key=jax.random.PRNGKey(0))
 
-        self.mask = jnp.full((1, 1, max_seq_len, max_seq_len), -jnp.inf)
-        self.mask = jnp.triu(self.mask, k=1)
+        self.mask = jnp.full((max_seq_len, max_seq_len), -jnp.inf).reshape(1, max_seq_len, max_seq_len)
+        self.mask = jnp.tril(self.mask, k=1)
     
-    def __call__(self, x: Array) -> Array:
-        seqlen, _ = x.shape
-        print(x.shape)
-
+    def do_attention(self, x: Array, mask: Array):
+        seqlen, local_n_embd = x.shape
+        
         # QKV
+        #xqkv = self.qkv_proj(x)
         xqkv = x @ self.qkv_proj.weight
         xq, xk, xv = jnp.split(xqkv, 3, axis=-1)
-        xq = xq.reshape(seqlen, self.n_heads, self.head_dim)
-        xk = xk.reshape(seqlen, self.n_kv_heads, self.head_dim)
-        xv = xv.reshape(seqlen, self.n_kv_heads, self.head_dim)
+        xq = xq.reshape(seqlen, self.n_heads, local_n_embd // self.n_heads).swapaxes(1, 2)
+        xk = xk.reshape(seqlen, self.n_kv_heads, local_n_embd // self.n_heads).swapaxes(1, 2)
+        xv = xv.reshape(seqlen, self.n_kv_heads, local_n_embd // self.n_heads).swapaxes(1, 2)
 
         # dot-product attention
-        scores = xq @ jnp.transpose(xk, (0, 2, 1)) / jax.lax.sqrt(float(self.head_dim))
-        # scores = scores + self.mask[:, :, :seqlen, :seqlen]
+        scores = xq @ jnp.transpose(xk, (0, 2, 1)) * (1.0 / jax.lax.sqrt(float(self.head_dim)))
+        # FIXME: masking
+        
+        ql, kl = xq.shape[-2], xk.shape[-2]
+        mask = mask[:, kl-ql:kl, :kl]
+        scores = jnp.where(mask == 0, float("-inf"), scores)
+
         scores = jax.nn.softmax(scores, axis=-1)
 
         xo = scores @ xv
 
-        xo = xo.reshape(seqlen, -1)
+        xo = xo.swapaxes(1, 2).reshape(seqlen, local_n_embd)
 
-        print(xo.shape)
-        print(self.o_proj.weight.shape)
+        return xo @ self.o_proj.weight
 
-        return jax.vmap(self.o_proj)(xo)
+    def __call__(self, x: Array, mask: Optional[Array] = None) -> Array:
+        if mask is None:
+            mask = self.mask
+
+        return self.do_attention(x, mask)
 
 # TODO
 class SelfAttentionWithRoPE(SelfAttention):

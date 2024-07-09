@@ -23,7 +23,10 @@ class GPT2MultiLayerPerceptron(eqx.Module):
         self.actv = get_activation_by_name(actv)
 
     def __call__(self, x: Array) -> Array:
-        return self.c_proj(self.actv(self.c_fc(x)))
+        x = x @ self.c_fc.weight + self.c_fc.bias
+        x = self.actv(x)
+        x = x @ self.c_proj.weight + self.c_proj.bias
+        return x
 
 class GPT2TransformerBlock(eqx.Module):
     n_heads: Int
@@ -262,7 +265,12 @@ class GPT2(GenerativeModel):
             )
             model.ln_f = ln_f_layer
 
-            model.lm_head = jnp.transpose(wte)
+            # FIXME: do we need to do this the other way around?
+            model.lm_head = eqx.tree_at(
+                lambda x: x.weight,
+                model.lm_head,
+                jnp.transpose(wte)
+            )
 
         return model
 
@@ -270,16 +278,16 @@ class GPT2(GenerativeModel):
         if x.shape[0] > self.max_seq_len:
             raise ValueError(f"Input sequence length {x.shape[0]} exceeds maximum sequence length {self.max_seq_len}")
 
-        pos = jnp.arange(0, x.shape[0])
+        pos = jnp.arange(x.shape[0])
         
-        x = self.wte.weight[x]
-        x = x + self.wpe.weight[pos]
+        x = jax.vmap(self.wte)(x)
+        x = x + jax.vmap(self.wpe)(pos)
         for transformer in self.transformers:
             x = transformer(x)
         x = self.ln_f(x)
-        return self.lm_head(x)
+        return jax.vmap(lambda x: x @ self.lm_head.weight)(x)
 
-    def generate(self, inp: any, n_output: int = 1):
+    def generate(self, inp: any):
         inp = jnp.asarray(inp)
         logits = self(inp)
-        return logits[-n_output:]
+        return logits
