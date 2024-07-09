@@ -22,6 +22,7 @@ class GPT2MultiLayerPerceptron(eqx.Module):
         self.c_proj = eqx.nn.Linear(intermediate_dim, dim, key=jax.random.PRNGKey(0))
         self.actv = get_activation_by_name(actv)
 
+    @jax.jit
     def __call__(self, x: Array) -> Array:
         x = x @ self.c_fc.weight + self.c_fc.bias
         x = self.actv(x)
@@ -50,9 +51,8 @@ class GPT2TransformerBlock(eqx.Module):
 
     def __call__(self, x: Array) -> Array:
         x = self.ln1(x)
-        x = self.attn(x)
-        x = self.ln2(x)
-        x = self.mlp(x)
+        x = x + self.attn(x)
+        x = x + self.mlp(x)
         return x
 
 class GPT2(GenerativeModel):

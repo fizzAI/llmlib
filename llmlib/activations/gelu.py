@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import jax
 
 class GELU(eqx.Module):
+    @jax.jit
     def __call__(self, x: Array):
         return (
             x / 2
@@ -17,6 +18,7 @@ class GELU(eqx.Module):
         )
 
 class ApproximateGELU(eqx.Module):
+    @jax.jit
     def __call__(self, x: Array):
         return x * (
             1 + jnp.tanh(

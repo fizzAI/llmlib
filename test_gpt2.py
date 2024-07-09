@@ -11,9 +11,9 @@ tokens = tokenizer.encode("In a shocking finding, scientist discovered a herd of
 
 print(tokenizer.decode(tokens), end="")
 while True:
-    logits = model.generate(tokens)[0]
-    output = [jnp.argmax(logits, axis=-1)]
+    logits = model.generate(tokens)
+    output = jnp.argmax(logits, axis=-1)
     print(tokenizer.decode(output), end="")
-    tokens += output
+    tokens += list(output)
     if len(tokens) > 1000:
         break
